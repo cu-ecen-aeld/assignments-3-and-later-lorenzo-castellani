@@ -17,6 +17,21 @@
 #include <signal.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <pthread.h>
+#include <sys/time.h>
+#include "queue.h"
+
+
+typedef struct slist_data_s slist_data_t;
+struct slist_data_s {
+    int new_fd;
+    int fd;
+    pthread_mutex_t* fd_mutex;
+    struct sockaddr_storage their_addr;
+    bool terminated;
+    pthread_t thrd;
+    SLIST_ENTRY(slist_data_s) entries;
+};
 
 
 void syslogaddrAccept(struct sockaddr* sockaddr)
@@ -114,34 +129,45 @@ void signal_callback_handler(int signum)
 }
 bool mywrite(int fd, void* lpBuf, size_t nCount)
 {
+   
+
     ssize_t nwr;
     char* ptr = (char*)lpBuf;
     size_t size = nCount;
 
     if (fd == -1)
+    {
         return false;
+    }
 
     
     while (size)
     {
         nwr = write(fd, ptr, size);
         if (nwr == -1)
+        {
+            
             return false;
+        }
         size -= nwr;
         ptr += nwr;
     }
+    
     return true;
 }
 
-bool myselect(int fd)
+bool myselect(int fd, int to)
 {
+    if (fd < 0)
+        return false;
     struct pollfd fdset;
     memset(&fdset, 0, sizeof(fdset));
-    fdset.events = POLLIN;
+    fdset.events = POLLPRI | POLLIN | POLLHUP | POLLNVAL | POLLERR;
     fdset.fd = fd;
     //printf("poll\n");
-    int res = poll(&fdset, 1, -1);
-    //printf("res=%d\n", res);
+    int res = poll(&fdset, 1, to);
+    //printf("revents%d=%X %d\n",to, fdset.revents,res);
+    
     if (res == 1 && fdset.revents & POLLIN)
         return true;
     
@@ -175,10 +201,10 @@ bool copy(int sfd, int dfd)
     return true;
 }
 
-#define BUFFSIZE 200000
+#define BUFFSIZE 4096
 ssize_t rxframe(int fd, char** pbuff, ssize_t* psz)
 {
-    
+    //printf("rxframe\n");
     char* tmp = NULL;
     ssize_t idx = 0;
     int nrd;
@@ -200,22 +226,27 @@ ssize_t rxframe(int fd, char** pbuff, ssize_t* psz)
             }
         }
 
-        if (myselect(fd))
+        if (myselect(fd, -1))
         {
-            nrd = read(fd, &(*pbuff)[idx], *psz - idx - 1);
-            //printf("rx=%d %d\n", nrd, errno);
-            if (nrd > 0)
+            nrd = read(fd, &(*pbuff)[idx], *psz - idx);
+            if (nrd == 0)
             {
-                (*pbuff)[idx + nrd] = 0;
-                while ((*pbuff)[idx] != 0)
-                {
-                    if ((*pbuff)[idx] == '\n')
-                        return idx + 1;
-                    ++idx;
-                }
+                printf("EOF\n");
+                return 0;
             }
+            //printf("rx=%d %d\n", nrd, errno);
+            while (nrd > 0)
+            {
+                if ((*pbuff)[idx] == '\n')
+                {         
+                    return idx + 1;
+                }
+                ++idx;
+                --nrd;
+            }
+            
 
-            else
+            if(nrd<0)
                 return -1;
         }
         else
@@ -224,18 +255,140 @@ ssize_t rxframe(int fd, char** pbuff, ssize_t* psz)
     return 0;
 }
 
+void* ClientApp(void *data)
+{
+    slist_data_t* datap = (slist_data_t*)data;
+
+    int nrd;
+    char* buff = NULL;
+    ssize_t sz = 0;
+     
+
+    while (!Ctrl_C_Event)
+    {
+        nrd = rxframe(datap->new_fd, &buff, &sz);
+        if (nrd > 0)
+        {
+            pthread_mutex_lock(datap->fd_mutex);
+            if (!mywrite(datap->fd, buff, nrd))
+            {
+                printf("Write file error: %d", errno);
+                syslog(LOG_ERR, "Write file error: %d", errno);
+                pthread_mutex_unlock(datap->fd_mutex);
+                break;
+            }
+            else if (!copy(datap->fd, datap->new_fd))
+            {
+                printf("copy error: %d\n", errno);
+                syslog(LOG_ERR, "Write file error: %d", errno);
+                pthread_mutex_unlock(datap->fd_mutex);
+                break;
+            }
+
+            pthread_mutex_unlock(datap->fd_mutex);
+
+        }
+        else if (nrd == 0)
+        {
+            shutdown(datap->new_fd, SHUT_RDWR);
+            //close(new_fd);
+            //new_fd = -1;
+            //syslogaddrClose((struct sockaddr*)&their_addr);
+            break;
+        }
+        else
+        {
+            if (datap->new_fd != -1)
+            {
+                shutdown(datap->new_fd, SHUT_RDWR);
+                //close(new_fd);
+                break;
+            }
+            break;
+        }
+
+    }
+
+    syslogaddrClose((struct sockaddr*)&datap->their_addr);
+
+    if (buff != NULL)
+    {
+        free(buff);
+        buff = NULL;
+    }
+    datap->terminated = true;
+    //printf("terminated\n");
+    return (void *)0;
+}
+
+unsigned int getclock_ms(void)
+{
+    struct timespec t;
+    int rc;
+    unsigned int time = 0;
+
+    rc = clock_gettime(CLOCK_MONOTONIC, &t);
+    if (rc == 0)
+    {
+        time = t.tv_sec * 1000;
+        time += t.tv_nsec / 1000000;
+    }
+    return time;
+}
+
+void* timerapp(void* data)
+{
+    slist_data_t* datap = (slist_data_t*)data;
+    //printf("timerapp\n");
+    unsigned int dt;
+    unsigned int t0 = getclock_ms();
+    char buff[256];
+
+    while (!Ctrl_C_Event)
+    {
+        usleep(100);
+        dt = getclock_ms() - t0;
+        if(dt>10000)
+        {
+            t0 = getclock_ms();
+            pthread_mutex_lock(datap->fd_mutex);
+            
+            struct timeval tv;
+            struct tm time;
+            gettimeofday(&tv, NULL);
+            localtime_r(&tv.tv_sec, &time);
+            strftime(buff, sizeof(buff)-1, "timestamp:%Y/%m/%d %H:%M:%S\n", &time);
+            printf("%s",buff);
+            write(datap->fd, buff, strlen(buff));
+            
+            pthread_mutex_unlock(datap->fd_mutex);
+        }
+    }
+    datap->terminated = true;
+    //printf("timerapp terminated\n");
+    return NULL;
+}
+
 int main(int argc, const char* argv[])
 {
     int status;
     struct addrinfo hints;
     struct addrinfo* servinfo;  // will point to the results
     int sockfd = -1;
+    pthread_mutex_t file_mutex;
+    pthread_mutex_init(&file_mutex, NULL);
     
     signal(SIGINT, signal_callback_handler);
     signal(SIGTERM, signal_callback_handler);
     signal(SIGPIPE, signal_callback_handler);
 
     openlog(NULL, 0, LOG_USER);
+
+    printf("startapp\n");
+
+ 
+
+   
     
 
     memset(&hints, 0, sizeof hints); // make sure the struct is empty
@@ -300,17 +453,85 @@ int main(int argc, const char* argv[])
         exit(-1);
     }
 
+
+    slist_data_t* datap = NULL;
+    slist_data_t* tmp = NULL;
+    SLIST_HEAD(slisthead, slist_data_s) head;
+    SLIST_INIT(&head);
+
+    datap = malloc(sizeof(slist_data_t));
+    datap->new_fd = -1;
+    datap->fd = fd;
+    datap->fd_mutex = &file_mutex;
+    datap->terminated = false;
+    if (pthread_create(&datap->thrd, NULL, timerapp, datap)) {
+        perror("ERROR creating thread.");
+        free(datap);
+    }
+    else
+    {
+        SLIST_INSERT_HEAD(&head, datap, entries);
+    }
+
+    //for (int i = 0; i < 5; i++) {
+    //    datap = malloc(sizeof(slist_data_t));
+    //    datap->fd = i;
+    //    printf("Insert: %d\n", datap->fd);
+    //    SLIST_INSERT_HEAD(&head, datap, entries);
+    //}
+    //printf("\n");
+
+    //SLIST_FOREACH(datap, &head, entries) {
+    //    printf("Read1: %d\n", datap->fd);
+    //}
+    //printf("\n");
+
+    //int n = 0;
+    //SLIST_FOREACH_SAFE(datap, &head, entries, tmp)
+    //{
+    //    if(n==1)
+    //    {
+    //        printf("remove %d\n", datap->fd);
+    //        SLIST_REMOVE(&head, datap, slist_data_s, entries);
+    //        free(datap);
+    //    }
+    //    ++n;
+    //}
+
+    //while (!SLIST_EMPTY(&head)) {
+    //    datap = SLIST_FIRST(&head);
+    //    printf("Read2: %d\n", datap->fd);
+    //    SLIST_REMOVE_HEAD(&head, entries);
+    //    free(datap);
+    //}
+
+    //exit(0);
+
     struct sockaddr_storage their_addr;
     int new_fd = -1;
     socklen_t addr_size;
-    int nrd;
-    char* buff = NULL;
-    ssize_t sz = 0;
+    //int nrd;
+    //char* buff = NULL;
+    //ssize_t sz = 0;
    
     while(!Ctrl_C_Event)
     {
-        if(myselect(sockfd))
+        if(myselect(sockfd, -1))
         {
+            SLIST_FOREACH_SAFE(datap, &head, entries, tmp)
+            {
+                if(datap->terminated)
+                {
+                    void** __thread_return=NULL;
+                    pthread_join(datap->thrd, __thread_return);
+                    if(datap->new_fd>0)
+                        close(datap->new_fd);
+                    SLIST_REMOVE(&head, datap, slist_data_s, entries);
+                    free(datap);
+                }
+            }
+
+
             addr_size = sizeof their_addr;
             new_fd = accept(sockfd, (struct sockaddr*)&their_addr, &addr_size);
             //printf("accept %d\n", new_fd);
@@ -318,37 +539,21 @@ int main(int argc, const char* argv[])
             if (new_fd != -1)
             {
                 syslogaddrAccept((struct sockaddr*)&their_addr);
-                
-                while (!Ctrl_C_Event)
-                {
-                    nrd=rxframe(new_fd, &buff, &sz);
-                    if (nrd > 0)
-                    {
-                        if (!mywrite(fd, buff, nrd))
-                        {
-                            printf("Write file error: %d", errno);
-                            syslog(LOG_ERR, "Write file error: %d", errno);
-                            break;
-                        }
-                        else if (!copy(fd, new_fd))
-                        {
-                            printf("copy error: %d\n", errno);
-                            syslog(LOG_ERR, "Write file error: %d", errno);
-                            break;
-                        }
-                    }
-                    else
-                    {
-                        if (new_fd != -1)
-                        {
-                            shutdown(new_fd, SHUT_RDWR);
-                            close(new_fd);
-                            syslogaddrClose((struct sockaddr*)&their_addr);
-                        }
-                        break;
-                    }
-
+                datap = malloc(sizeof(slist_data_t));
+                datap->new_fd = new_fd;
+                datap->fd = fd;
+                datap->fd_mutex = &file_mutex;
+                datap->their_addr = their_addr;
+                datap->terminated = false;
+                if (pthread_create(&datap->thrd, NULL, ClientApp, datap)) {
+                    perror("ERROR creating thread.");
+                    free(datap);
                 }
+                else
+                {
+                    SLIST_INSERT_HEAD(&head, datap, entries);
+                }
+                
                 
             }
             else
@@ -364,12 +569,33 @@ int main(int argc, const char* argv[])
         }
     }
 
-    if (new_fd != -1)
+    if (Ctrl_C_Event)
+        fprintf(stderr, "Signal exiting\n");
+
+    Ctrl_C_Event = true;
+    while (!SLIST_EMPTY(&head))
+    {
+        datap = SLIST_FIRST(&head);
+        if (!datap->terminated)
+        {
+            //printf("close fd=%d\n", datap->new_fd);
+            if (datap->new_fd > 0)
+            {
+                shutdown(datap->new_fd, SHUT_RDWR);
+                close(datap->new_fd);
+            }
+        }
+        void** __thread_return=NULL;
+        pthread_join(datap->thrd, __thread_return);
+        SLIST_REMOVE_HEAD(&head, entries);
+        free(datap);
+    }
+
+ /*   if (new_fd != -1)
     {
         shutdown(new_fd, SHUT_RDWR);
         close(new_fd);
-        syslogaddrClose((struct sockaddr*)&their_addr);
-    }
+    }*/
 
     
 
@@ -379,18 +605,6 @@ int main(int argc, const char* argv[])
     if (fd != -1)
         close(fd);
 
-    if (buff != NULL)
-    {
-        free(buff);
-        buff = NULL;
-    }
-
-    if(Ctrl_C_Event)
-        fprintf(stderr, "Signal exiting\n");
-
-    
-    
-    
-
+    pthread_mutex_destroy(&file_mutex);
     return 0;
 }
