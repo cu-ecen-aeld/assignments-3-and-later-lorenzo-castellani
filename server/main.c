@@ -156,10 +156,12 @@ bool mywrite(int fd, void* lpBuf, size_t nCount)
     return true;
 }
 
-bool myselect(int fd, int to)
+int myselect(int fd, int to)
 {
     if (fd < 0)
         return false;
+
+
     struct pollfd fdset;
     memset(&fdset, 0, sizeof(fdset));
     fdset.events = POLLPRI | POLLIN | POLLHUP | POLLNVAL | POLLERR;
@@ -167,11 +169,20 @@ bool myselect(int fd, int to)
     //printf("poll\n");
     int res = poll(&fdset, 1, to);
     //printf("revents%d=%X %d\n",to, fdset.revents,res);
-    
+    if (res == 0) //timeout
+    {
+        if (Ctrl_C_Event)
+        {
+            syslog(LOG_INFO, "-Signal exiting-\n");
+            return -1;
+        }
+        return 0;
+    }
+
     if (res == 1 && fdset.revents & POLLIN)
-        return true;
+        return 1;
     
-    return false;
+    return -1;
 }
 
 bool copy(int sfd, int dfd)
@@ -208,6 +219,7 @@ ssize_t rxframe(int fd, char** pbuff, ssize_t* psz)
     char* tmp = NULL;
     ssize_t idx = 0;
     int nrd;
+    int sel;
     while (!Ctrl_C_Event)
     {
         if (*psz <= idx)
@@ -226,7 +238,8 @@ ssize_t rxframe(int fd, char** pbuff, ssize_t* psz)
             }
         }
 
-        if (myselect(fd, -1))
+        sel = myselect(fd, 100);
+        if (sel ==1)
         {
             nrd = read(fd, &(*pbuff)[idx], *psz - idx);
             if (nrd == 0)
@@ -248,6 +261,10 @@ ssize_t rxframe(int fd, char** pbuff, ssize_t* psz)
 
             if(nrd<0)
                 return -1;
+        }
+        else if (sel == 0)
+        {
+
         }
         else
             return -1;
@@ -513,10 +530,11 @@ int main(int argc, const char* argv[])
     //int nrd;
     //char* buff = NULL;
     //ssize_t sz = 0;
-   
+    int sel;
     while(!Ctrl_C_Event)
     {
-        if(myselect(sockfd, -1))
+        sel = myselect(sockfd, 100);
+        if(sel==1)
         {
             SLIST_FOREACH_SAFE(datap, &head, entries, tmp)
             {
@@ -563,6 +581,10 @@ int main(int argc, const char* argv[])
                 break;
             }
         }
+        else if (sel == 0)
+        {
+
+        }
         else
         {
             break;
@@ -570,7 +592,10 @@ int main(int argc, const char* argv[])
     }
 
     if (Ctrl_C_Event)
+    {
+        syslog(LOG_INFO, "Signal exiting\n");
         fprintf(stderr, "Signal exiting\n");
+    }
 
     Ctrl_C_Event = true;
     while (!SLIST_EMPTY(&head))
