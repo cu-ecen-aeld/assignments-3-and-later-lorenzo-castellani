@@ -2,8 +2,10 @@
 default_target : all
 
 LDFLAGS ?= -lpthread -lrt
-CFLAGS ?= -g -Wall -Werror -DUSE_AESD_CHAR_DEVICE=1
+CFLAGS ?= -g -Wall -Werror
 C_SRCS:= main.c
+
+CFLAGS += -DUSE_AESD_CHAR_DEVICE=1
 
 OBJS := $(subst .cpp,.o,$(C_SRCS))
 OBJS := $(subst .c,.o,$(OBJS))
