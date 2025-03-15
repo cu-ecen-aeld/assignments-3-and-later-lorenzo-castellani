@@ -5,7 +5,7 @@ LDFLAGS ?= -lpthread -lrt
 CFLAGS ?= -g -Wall -Werror
 C_SRCS:= main.c
 
-CFLAGS += -DUSE_AESD_CHAR_DEVICE=1
+
 
 OBJS := $(subst .cpp,.o,$(C_SRCS))
 OBJS := $(subst .c,.o,$(OBJS))
@@ -20,7 +20,7 @@ all : aesdsocket
 
 ./aesdsocket : $(OBJS)
 	@echo   $(TYPE)LD        $@
-	$(CC) -o aesdsocket $(CFLAGS)     $(OBJS) $(LDFLAGS) 
+	$(CC) -o aesdsocket $(CFLAGS)  -DUSE_AESD_CHAR_DEVICE=1   $(OBJS) $(LDFLAGS) 
 
 
 
