@@ -25,7 +25,7 @@
 typedef struct slist_data_s slist_data_t;
 struct slist_data_s {
     int new_fd;
-    int fd;
+    const char * filename;
     pthread_mutex_t* fd_mutex;
     struct sockaddr_storage their_addr;
     bool terminated;
@@ -112,6 +112,27 @@ void syslogaddrClose(struct sockaddr* sockaddr)
 
 }
 
+int open_r(slist_data_t* datap)
+{
+    int fd = open(datap->filename, O_RDONLY); //clear file
+    if (fd == -1)
+    {
+        syslog(LOG_ERR, "Open file %s error: %d", datap->filename, errno);
+    }
+    return fd;
+}
+
+int open_w(slist_data_t* datap)
+{
+    int fd = open(datap->filename, O_WRONLY | O_APPEND); //clear file
+    if (fd == -1)
+    {
+        syslog(LOG_ERR, "Open file %s error: %d", datap->filename, errno);
+    }
+    return fd;
+}
+
+
 volatile bool Ctrl_C_Event = false;
 void signal_callback_handler(int signum)
 {
@@ -127,9 +148,9 @@ void signal_callback_handler(int signum)
         break;
     }
 }
-bool mywrite(int fd, void* lpBuf, size_t nCount)
+bool mywrite(slist_data_t* datap, void* lpBuf, size_t nCount)
 {
-   
+    int fd = open_w(datap);
 
     ssize_t nwr;
     char* ptr = (char*)lpBuf;
@@ -146,13 +167,13 @@ bool mywrite(int fd, void* lpBuf, size_t nCount)
         nwr = write(fd, ptr, size);
         if (nwr == -1)
         {
-            
+            close(fd);
             return false;
         }
         size -= nwr;
         ptr += nwr;
     }
-    
+    close(fd);
     return true;
 }
 
@@ -185,30 +206,41 @@ int myselect(int fd, int to)
     return -1;
 }
 
-bool copy(int sfd, int dfd)
+bool copy(slist_data_t* datap, int dfd)
 {
+    int sfd = open_r(datap);
     char buf[4096];
     int nrd;
     int nwr;
-    off_t pos = lseek(sfd, 0, SEEK_CUR);
-    if (pos < 0)
-        return false;
-    lseek(sfd, 0, SEEK_SET);
-    off_t cp = 0;
+//    off_t pos = lseek(sfd, 0, SEEK_CUR);
+//    if (pos < 0)
+//        return false;
+//    lseek(sfd, 0, SEEK_SET);
+//    off_t cp = 0;
     do
     {
         nrd = read(sfd, buf, sizeof(buf));
         if (nrd < 0)
+        {
+            close(sfd);
             return false;
+        }
 
-        nwr = write(dfd, buf, nrd);
-        if (nwr < 0)
-            return false;
+        if(nrd>0)
+        {
+            nwr = write(dfd, buf, nrd);
+            if (nwr < 0)
+            {
+                close(sfd);
+                return false;
+            }
+        }
 
-        cp += nwr;
-    } while (cp<pos);
+ //       cp += nwr;
+    } while (nrd>0);
 
-    lseek(sfd, pos, SEEK_SET);
+ //   lseek(sfd, pos, SEEK_SET);
+    close(sfd);
     return true;
 }
 
@@ -272,6 +304,8 @@ ssize_t rxframe(int fd, char** pbuff, ssize_t* psz)
     return 0;
 }
 
+
+
 void* ClientApp(void *data)
 {
     slist_data_t* datap = (slist_data_t*)data;
@@ -287,14 +321,14 @@ void* ClientApp(void *data)
         if (nrd > 0)
         {
             pthread_mutex_lock(datap->fd_mutex);
-            if (!mywrite(datap->fd, buff, nrd))
+            if (!mywrite(datap, buff, nrd))
             {
-                printf("Write file error: %d", errno);
+                printf("Write file error: %d\n", errno);
                 syslog(LOG_ERR, "Write file error: %d", errno);
                 pthread_mutex_unlock(datap->fd_mutex);
                 break;
             }
-            else if (!copy(datap->fd, datap->new_fd))
+            else if (!copy(datap, datap->new_fd))
             {
                 printf("copy error: %d\n", errno);
                 syslog(LOG_ERR, "Write file error: %d", errno);
@@ -353,6 +387,7 @@ unsigned int getclock_ms(void)
     return time;
 }
 
+
 void* timerapp(void* data)
 {
     slist_data_t* datap = (slist_data_t*)data;
@@ -360,6 +395,7 @@ void* timerapp(void* data)
     unsigned int dt;
     unsigned int t0 = getclock_ms();
     char buff[256];
+
 
     while (!Ctrl_C_Event)
     {
@@ -376,7 +412,13 @@ void* timerapp(void* data)
             localtime_r(&tv.tv_sec, &time);
             strftime(buff, sizeof(buff)-1, "timestamp:%Y/%m/%d %H:%M:%S\n", &time);
             printf("%s",buff);
-            write(datap->fd, buff, strlen(buff));
+            
+            int fd = open_w(datap);
+            if(fd>=0)
+            {
+                write(fd, buff, strlen(buff));
+            }
+            close(fd);
             
             pthread_mutex_unlock(datap->fd_mutex);
         }
@@ -452,7 +494,9 @@ int main(int argc, const char* argv[])
         }
     }
 
-    int fd = open("/var/tmp/aesdsocketdata", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    
+#ifndef USE_AESD_CHAR_DEVICE
+    int fd = open("/var/tmp/aesdsocketdata", O_CREAT | O_RDWR | O_TRUNC, 0644); //clear file
     if (fd == -1)
     {
         syslog(LOG_ERR, "Open file %s error: %d", "/var/tmp/aesdsocketdata", errno);
@@ -460,6 +504,8 @@ int main(int argc, const char* argv[])
             close(sockfd);
         exit(-1);
     }
+    close(fd);
+#endif
 
     if (listen(sockfd, 5) != 0)
     {
@@ -476,11 +522,14 @@ int main(int argc, const char* argv[])
     SLIST_HEAD(slisthead, slist_data_s) head;
     SLIST_INIT(&head);
 
+    
+
+#ifndef USE_AESD_CHAR_DEVICE
     datap = malloc(sizeof(slist_data_t));
     datap->new_fd = -1;
-    datap->fd = fd;
     datap->fd_mutex = &file_mutex;
     datap->terminated = false;
+    datap->filename = "/var/tmp/aesdsocketdata";
     if (pthread_create(&datap->thrd, NULL, timerapp, datap)) {
         perror("ERROR creating thread.");
         free(datap);
@@ -489,47 +538,17 @@ int main(int argc, const char* argv[])
     {
         SLIST_INSERT_HEAD(&head, datap, entries);
     }
+#endif // !USE_AESD_CHAR_DEVICE
+    
+    
+    
 
-    //for (int i = 0; i < 5; i++) {
-    //    datap = malloc(sizeof(slist_data_t));
-    //    datap->fd = i;
-    //    printf("Insert: %d\n", datap->fd);
-    //    SLIST_INSERT_HEAD(&head, datap, entries);
-    //}
-    //printf("\n");
-
-    //SLIST_FOREACH(datap, &head, entries) {
-    //    printf("Read1: %d\n", datap->fd);
-    //}
-    //printf("\n");
-
-    //int n = 0;
-    //SLIST_FOREACH_SAFE(datap, &head, entries, tmp)
-    //{
-    //    if(n==1)
-    //    {
-    //        printf("remove %d\n", datap->fd);
-    //        SLIST_REMOVE(&head, datap, slist_data_s, entries);
-    //        free(datap);
-    //    }
-    //    ++n;
-    //}
-
-    //while (!SLIST_EMPTY(&head)) {
-    //    datap = SLIST_FIRST(&head);
-    //    printf("Read2: %d\n", datap->fd);
-    //    SLIST_REMOVE_HEAD(&head, entries);
-    //    free(datap);
-    //}
-
-    //exit(0);
+    
 
     struct sockaddr_storage their_addr;
     int new_fd = -1;
     socklen_t addr_size;
-    //int nrd;
-    //char* buff = NULL;
-    //ssize_t sz = 0;
+    
     int sel;
     while(!Ctrl_C_Event)
     {
@@ -559,7 +578,14 @@ int main(int argc, const char* argv[])
                 syslogaddrAccept((struct sockaddr*)&their_addr);
                 datap = malloc(sizeof(slist_data_t));
                 datap->new_fd = new_fd;
-                datap->fd = fd;
+#ifndef USE_AESD_CHAR_DEVICE
+                datap->filename = "/var/tmp/aesdsocketdata";
+                printf("use %s\n", datap->filename);
+#else
+                
+                datap->filename = "/dev/aesdchar";
+                printf("use %s\n", datap->filename);
+#endif // !USE_AESD_CHAR_DEVICE
                 datap->fd_mutex = &file_mutex;
                 datap->their_addr = their_addr;
                 datap->terminated = false;
@@ -603,7 +629,7 @@ int main(int argc, const char* argv[])
         datap = SLIST_FIRST(&head);
         if (!datap->terminated)
         {
-            //printf("close fd=%d\n", datap->new_fd);
+      
             if (datap->new_fd > 0)
             {
                 shutdown(datap->new_fd, SHUT_RDWR);
@@ -616,20 +642,13 @@ int main(int argc, const char* argv[])
         free(datap);
     }
 
- /*   if (new_fd != -1)
-    {
-        shutdown(new_fd, SHUT_RDWR);
-        close(new_fd);
-    }*/
-
+ 
     
 
     if (sockfd != -1)
         close(sockfd);
 
-    if (fd != -1)
-        close(fd);
-
+   
     pthread_mutex_destroy(&file_mutex);
     return 0;
 }

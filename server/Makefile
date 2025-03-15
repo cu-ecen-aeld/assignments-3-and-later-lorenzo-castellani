@@ -2,7 +2,7 @@
 default_target : all
 
 LDFLAGS ?= -lpthread -lrt
-CFLAGS ?= -g -Wall -Werror
+CFLAGS ?= -g -Wall -Werror -DUSE_AESD_CHAR_DEVICE=1
 C_SRCS:= main.c
 
 OBJS := $(subst .cpp,.o,$(C_SRCS))

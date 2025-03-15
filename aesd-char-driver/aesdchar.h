@@ -4,7 +4,7 @@
  *  Created on: Oct 23, 2019
  *      Author: Dan Walkes
  */
-
+#include "aesd-circular-buffer.h"
 #ifndef AESD_CHAR_DRIVER_AESDCHAR_H_
 #define AESD_CHAR_DRIVER_AESDCHAR_H_
 
@@ -23,11 +23,18 @@
 #  define PDEBUG(fmt, args...) /* not debugging: nothing */
 #endif
 
+#define DEF_CMDBUF_SIZE 4096
 struct aesd_dev
 {
     /**
      * TODO: Add structure(s) and locks needed to complete assignment requirements
      */
+    struct mutex lock;
+    char *cmdbuff;
+    size_t szcmdbuf;
+    size_t cmdidx;
+    struct aesd_circular_buffer circbuf;
+    size_t rdchar_ofs;
     struct cdev cdev;     /* Char device structure      */
 };
 
