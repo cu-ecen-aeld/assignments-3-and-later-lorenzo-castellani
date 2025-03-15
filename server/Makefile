@@ -20,13 +20,13 @@ all : aesdsocket
 
 ./aesdsocket : $(OBJS)
 	@echo   $(TYPE)LD        $@
-	$(CC) -o aesdsocket $(CFLAGS)  -DUSE_AESD_CHAR_DEVICE=1   $(OBJS) $(LDFLAGS) 
+	$(CC) -o aesdsocket $(CFLAGS)     $(OBJS) $(LDFLAGS) 
 
 
 
 ./%.o : %.c
 	@echo   $(TYPE)CC        $<	
-	$(CC) -c  $(CFLAGS)  -o $@ $<
+	$(CC) -c  $(CFLAGS) -DUSE_AESD_CHAR_DEVICE=1 -o $@ $<
 
 clean : 
 	-@echo   CLEAN     
