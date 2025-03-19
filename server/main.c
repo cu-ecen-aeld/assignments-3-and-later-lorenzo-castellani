@@ -19,7 +19,9 @@
 #include <stdbool.h>
 #include <pthread.h>
 #include <sys/time.h>
+#include <sys/ioctl.h>
 #include "queue.h"
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 
 typedef struct slist_data_s slist_data_t;
@@ -206,17 +208,22 @@ int myselect(int fd, int to)
     return -1;
 }
 
-bool copy(slist_data_t* datap, int dfd)
+bool copy(slist_data_t* datap, int dfd, int cmd, int ofs)
 {
     int sfd = open_r(datap);
     char buf[4096];
     int nrd;
     int nwr;
-//    off_t pos = lseek(sfd, 0, SEEK_CUR);
-//    if (pos < 0)
-//        return false;
-//    lseek(sfd, 0, SEEK_SET);
-//    off_t cp = 0;
+
+    if(cmd>=0)
+    {
+        struct aesd_seekto skt;
+        skt.write_cmd=cmd;
+        skt.write_cmd_offset=ofs;
+        int err=ioctl(sfd,AESDCHAR_IOCSEEKTO,&skt);
+        printf( "ioctl error:%d %d\n",err,errno);
+    }
+
     do
     {
         nrd = read(sfd, buf, sizeof(buf));
@@ -236,10 +243,10 @@ bool copy(slist_data_t* datap, int dfd)
             }
         }
 
- //       cp += nwr;
+ 
     } while (nrd>0);
 
- //   lseek(sfd, pos, SEEK_SET);
+ 
     close(sfd);
     return true;
 }
@@ -321,19 +328,50 @@ void* ClientApp(void *data)
         if (nrd > 0)
         {
             pthread_mutex_lock(datap->fd_mutex);
-            if (!mywrite(datap, buff, nrd))
+            buff[nrd]=0;
+            if(strncmp(buff,"AESDCHAR_IOCSEEKTO:",19)==0)
             {
-                printf("Write file error: %d\n", errno);
-                syslog(LOG_ERR, "Write file error: %d", errno);
-                pthread_mutex_unlock(datap->fd_mutex);
-                break;
+                printf("-> %s\n", buff);
+                int i=19;
+                while(buff[i]!=0)
+                {
+                    if(buff[i]==',')
+                    {
+                        buff[i]=0;
+                        ++i;
+                        break;
+                    }
+                    ++i;
+                }
+                
+                int ofs=atoi(&buff[i]);
+                int cmd=atoi(&buff[19]);
+                printf("AESDCHAR_IOCSEEKTO: %d %d -> %s\n", cmd, ofs,buff);
+                
+                if (!copy(datap, datap->new_fd,cmd,ofs))
+                {
+                    printf("copy error: %d\n", errno);
+                    syslog(LOG_ERR, "Write file error: %d", errno);
+                    pthread_mutex_unlock(datap->fd_mutex);
+                    break;
+                }
             }
-            else if (!copy(datap, datap->new_fd))
+            else
             {
-                printf("copy error: %d\n", errno);
-                syslog(LOG_ERR, "Write file error: %d", errno);
-                pthread_mutex_unlock(datap->fd_mutex);
-                break;
+                if (!mywrite(datap, buff, nrd))
+                {
+                    printf("Write file error: %d\n", errno);
+                    syslog(LOG_ERR, "Write file error: %d", errno);
+                    pthread_mutex_unlock(datap->fd_mutex);
+                    break;
+                }
+                else if (!copy(datap, datap->new_fd,-1,0))
+                {
+                    printf("copy error: %d\n", errno);
+                    syslog(LOG_ERR, "Write file error: %d", errno);
+                    pthread_mutex_unlock(datap->fd_mutex);
+                    break;
+                }
             }
 
             pthread_mutex_unlock(datap->fd_mutex);
